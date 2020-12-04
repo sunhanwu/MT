@@ -3,6 +3,9 @@ import copy
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
+import math
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from model import *
 
 def aggreVocab(filePaths, outputPath):
     """
@@ -58,6 +61,25 @@ def subsequent_mask(size):
     # 通过==0的操作，下三角全置为1
     return torch.from_numpy(subsequent_mask) == 0
 
+def batch_subsequent_mask(batch:list):
+    """
+    调用subsequent_mask函数，将batch转换为一个三维的mask
+    :param batch: 一维的tensor，表示每个seq的长度
+    :return: 三维tensor，(batch_size, size, size)
+    """
+    mask = []
+    for item in batch:
+        mask.append(subsequent_mask(item).squeeze(0))
+    return torch.tensor(mask)
+
+def make_std_mask(tgt, pad):
+    "Create a mask to hide padding and future words."
+    tgt_mask = (tgt != pad).unsqueeze(-2)
+    tgt_mask = tgt_mask & torch.tensor(subsequent_mask(tgt.size(-1)).type_as(tgt_mask.data))
+    return tgt_mask
+
+
+
 def attention(query, key, value, mask=None, dropout=None):
     """
     attention计算
@@ -72,13 +94,16 @@ def attention(query, key, value, mask=None, dropout=None):
     # query.shape=(batch_size, head_num, seq_len, d_k)
     # key.shape=(batch_size, head_num, seq_len, d_k)
     # value.shape=(batch_size, head_num, seq_len, d_k)
+    # mask.shape=(batch_size, 1, 1, seq_len)
     embedding_dim = query.size(-1)
     # 这一步实现Q和K的attention计算，Q和K都是四维，只需要计算最后两维即可
-    # Q.dot(K^T).shape = (batch_size, head_num, seq_len, seq_len)
-    scores = torch.matmul(query, key.transpose(-2, -1)) / torch.sqrt(embedding_dim)
+    # scores.shape = Q.dot(K^T).shape = (batch_size, head_num, seq_len, seq_len)
+    scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(embedding_dim)
+    # scores.shape=(batch_size, head_num, seq_len, seq_len)
     if mask is not None:
         # 对于mask为0的位置，给填充一个特别小的数，使用softmax计算概率的时候基本为0
         scores = scores.masked_fill(mask==0, -1e9)
+        # scores.shape=(batch_size, head_num, seq_len, seq_len)
     # 对scores的最后一位进行softmax计算
     attention_weight = F.softmax(scores, dim=-1)
     # attention_weight.shape=(batch_size, head_num, seq_len, seq_len)
@@ -88,23 +113,88 @@ def attention(query, key, value, mask=None, dropout=None):
     # attention_weight.dot(value).shape=(batch_size, head_num, seq_len, d_k)
     return torch.matmul(attention_weight, value), attention_weight
 
-def collate_fn(data):
+def collate_fn(data, padding_length):
     """
     对batch级别进行padding
     :param data: 要padding的数据
+    :param padding_length: padding的长度
     :return: 处理好的X, y, lengths before padding
     """
-    data.sort(key=lambda x: len(x[0]), reverse=True)
-    data_X = [x[0] for x in data]
-    data_y = [x[1] for x in data]
-    length_X = len(data_X)
-    length_y = len(data_y)
-    data_X = torch.nn.utils.rnn.pad_sequence(data_X, batch_first=True, padding_value=3)
-    data_y = torch.nn.utils.rnn.pad_sequence(data_y, batch_first=True, padding_value=3)
-    return data_X, data_y, torch.tensor(length_X), torch
+    pass
+    # data_X = [x[0] for x in data]
+    # data_y = [x[1] for x in data]
+    # length_X = [len(x) for x in data_X]
+    # length_y = [len(x) for x in data_y]
+    # data_X = [torch.cat()]
+    # data_X= F.pad(data_X, )
+    # return data_X, data_y, torch.tensor(length_X), torch.tensor(length_y)
 
+def compute_bleu(translate, reference, references_lens):
+    """
+    计算翻译句子的的BLEU值
+    :param translate: transformer翻译的句子
+    :param reference: 标准译文
+    :return: BLEU值
+    """
+    # 定义平滑函数
+    translate = translate.tolist()
+    reference = reference.tolist()
+    smooth = SmoothingFunction()
+    references_lens = references_lens.tolist()
+    blue_score = []
+    for translate_sentence, reference_sentence, references_len in zip(translate, reference, references_lens):
+        if 1 in translate_sentence:
+            index = translate_sentence.index(1)
+        else:
+            index = len(translate_sentence)
+        blue_score.append(sentence_bleu([reference_sentence[:references_len]], translate_sentence[:index], weights=(0.3, 0.4, 0.3, 0.0), smoothing_function=smooth.method1))
+    return blue_score
+
+def initTranslateModel(args, modelpath):
+    cp = copy.deepcopy
+    multiHeadAttention = MultiHeadAttention(head_num=args.head_num, multi_output_dim=args.embedding_dim).to(device)
+    feedForward = PositionWiseFeedForward(embedding_dim=args.embedding_dim, hidden_num=args.hidden_num,
+                                          dropout=args.dropout).to(device)
+    position = PositionalEncoding(embedding_dim=args.embedding_dim, dropout=args.dropout).to(device)
+
+    # 构建Encoder
+    encodeLayer = EncodeLayer(args.embedding_dim, cp(multiHeadAttention), cp(feedForward), dropout=args.dropout).to(
+        device)
+    transformerEncoder = TransformerEncoder(encode_layer=encodeLayer, N=6).to(device)
+
+    # 构建Decoder
+    decodeLayer = DecodeLayer(args.embedding_dim, cp(multiHeadAttention), cp(multiHeadAttention), cp(feedForward),
+                              args.dropout).to(device)
+    transformerDecoder = TransformerDecoder(decode_layer=decodeLayer, N=6).to(device)
+
+    # 构建srd_embedding
+    src_embedding = nn.Sequential(Embeddings(args.embedding_dim, enVocabLen), cp(position)).to(device)
+    dst_embedding = nn.Sequential(Embeddings(args.embedding_dim, zhVocabLen), cp(position)).to(device)
+
+    # 构建generator
+    generator = Generator(decoder_dim=args.embedding_dim, vocab_len=zhVocabLen).to(device)
+
+    # 构建transformer 机器翻译模型
+    translateEn2Zh = TranslateEn2Zh(encoder=transformerEncoder, decoder=transformerDecoder, src_embedding=src_embedding, \
+                                    dst_embedding=dst_embedding, generator=generator).to(device)
+    translateEn2Zh.load_state_dict(torch.load(modelpath))
+    return translateEn2Zh
+
+def testModel(modelpath):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch_size', type=int, default=64, help='minibatch size')
+    parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
+    parser.add_argument('--num_epochs', type=int, default=1, help='number of epochs')
+    parser.add_argument('--embedding_dim', type=int, default=128, help='number of word embedding')
+    parser.add_argument('--gpu', type=int, default=0, help='GPU No, only support 1 or 2')
+    parser.add_argument('--head_num', type=int, default=8, help="Multi head number")
+    parser.add_argument('--hidden_num', type=int, default=2048, help="hidden neural number")
+    parser.add_argument('--dropout', type=float, default=0.1, help="dropout rate")
+    parser.add_argument('--padding', type=int, default=50, help="padding length")
+    args = parser.parse_args()
+    translateModel = initTranslateModel(args, modelpath)
+    return translateModel
 
 
 if __name__ == '__main__':
-    aggreVocab(['../data/train.zh.tok', '../data/valid.zh.tok', '../data/test.zh.tok'], '../data/vocab_zh.npy')
-    aggreVocab(['../data/train.en.tok', '../data/valid.en.tok', '../data/test.en.tok'], '../data/vocab_en.npy')
+    pass

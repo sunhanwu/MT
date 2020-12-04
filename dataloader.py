@@ -7,13 +7,16 @@ class Data(Dataset):
     """
     机器翻译模型的数据集
     """
-    def __init__(self, mode='train'):
+    def __init__(self, padding, mode='train'):
         """
         构造函数
         :param mode: 指定是训练还是测试
+        :param padding: padding的长度
         """
+        print("load {} data".format(mode))
         assert mode in ['train', 'valid', 'test'], "mode must in ['train', 'valid', 'test']"
         self.mdoe = mode
+        self.padding = padding
         # 读取词表文件
         self.vocab_zh = np.load('../data/vocab_zh.npy').item()
         self.vocab_en = np.load('../data/vocab_en.npy').item()
@@ -51,9 +54,25 @@ class Data(Dataset):
         :param index: 索引
         :return: index对应的训练数据X和对应的label
         """
-        en = torch.tensor(self.data_en[index])
-        zh = torch.tensor(self.data_zh[index])
-        return en, zh
+        en = self.data_en[index]
+        zh = self.data_zh[index]
+        en = [0] + en + [1]
+        zh = [0] + zh + [1]
+        len_zh = len(zh) - 1
+        # 对目标句子增加其实和终止符
+        if len(en) < self.padding:
+            en.extend([3] * (self.padding - len(en)))
+        else:
+            en = en[:self.padding]
+        if len(zh) < self.padding:
+            zh.extend([3] * (self.padding - len(zh)))
+        else:
+            zh = zh[:self.padding]
+        en = torch.tensor(en)
+        zh = torch.tensor(zh)
+        # 分别返回en，训练用的zh[:-1]，和作为目标的zh[1:]
+        return en, zh[:-1], zh[1:], len_zh
+    # test
 
     def __len__(self):
         """

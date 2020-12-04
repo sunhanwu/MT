@@ -1,5 +1,8 @@
 """
-下面代码中实现的transformer模型参考知乎文章https://zhuanlan.zhihu.com/p/118601295
+下面代码中实现的transformer模型参考知乎文章: https://zhuanlan.zhihu.com/p/118601295
+原始代码连接: https://github.com/harvardnlp/annotated-transformer/blob/master/The%20Annotated%20Transformer.ipynb
+根据自己对Transformer的理解对所有代码都进行了详细注释
+dataloader全部，model中的训练逻辑和utils.py中除了attention外均为自行实现
 """
 import torch
 from torch import nn
@@ -9,8 +12,14 @@ import torch.nn.functional as F
 import numpy as np
 from utils import *
 import copy
+import time
+import math
 import argparse
+import ipdb
+import warnings
 from tqdm import tqdm
+warnings.filterwarnings("ignore")
+# torch.manual_seed(1) # 设置随机种子，使结果可复现
 
 class TranslateEn2Zh(nn.Module):
     """
@@ -37,12 +46,17 @@ class TranslateEn2Zh(nn.Module):
         前向传播函数
         :param english_seq: 英文序列
         :param chinese_seq: 中文序列
-        :param english_mask: ???
-        :param chinese_mask: ???
+        :param english_mask: 原始序列的mask, 主要作用是mask掉padding
+        :param chinese_mask: 目标序列的mask，防止标签泄露，所以是一个下三角矩阵
         :return:
         """
+        # english_seq.shape=(batch_size, seq_len)
+        # chinese_seq.shape=(batch_size, seq_len)
+        # english_mask.shape=(batch_size, 1, seq_len)
+        # chinese_mask.shape=(batch_size, seq_len, seq_len)
         memory = self.encode(english_seq, english_mask)
-        output = self.decode(memory, english_mask, chinese_seq, chinese_mask)
+        # memory.shape=(batch_size, seq_len, embedding_dim)
+        output = self.decode(memory=memory, chinese_seq=chinese_seq, english_mask=english_mask, chinese_mask=chinese_mask)
         return output
 
     def encode(self, english_seq, english_mask):
@@ -54,7 +68,7 @@ class TranslateEn2Zh(nn.Module):
         """
         return self.encoder(self.src_embedding(english_seq), english_mask)
 
-    def decode(self, memory, english_mask, chinese_seq ,chinses_mask):
+    def decode(self, memory, english_mask, chinese_seq ,chinese_mask):
         """
         Transformer的解码器
         :param memory: 应该是encoder编码后的输出
@@ -63,7 +77,7 @@ class TranslateEn2Zh(nn.Module):
         :param chinses_mask: 中文序列mask
         :return:
         """
-        return self.decoder(self.dst_embedding(chinese_seq), memory, english_mask, chinses_mask)
+        return self.decoder(self.dst_embedding(chinese_seq), memory, english_mask, chinese_mask)
 
 
 class Generator(nn.Module):
@@ -114,8 +128,11 @@ class TransformerEncoder(nn.Module):
         :param mask:
         :return: Transformer的Encoder编码后的数据
         """
+        # x.shape=(batch_size, seq_len, embedding_dim)
+        # mask.shape=(batch_size, 1, seq_len)
         for layer in self.layers:
             x = layer(x, mask)
+            # x.shape=(batch_size, seq_len, embedding_dim)
         # 最后加一层Normalization层
         return self.norm(x)
 
@@ -147,6 +164,9 @@ class EncodeLayer(nn.Module):
         :param mask:
         :return:
         """
+        # x.shape=(batch_size, seq_len, embedding_dim)
+        # mask.shape=(batch_size, 1, seq_len)
+        ##
         # 进行self attention
         # self-attention需要四个输入， 分别是Query，Key，Value和最后的Mask
         # lambda 表达式中的x不是EncodeLayer的输入x，而是一个形式参数，可以是y或者其他任何名称，最终输入到lambda中的应该是SubEncodeLayer层中的self.norm(x)
@@ -177,6 +197,8 @@ class SubLayer(nn.Module):
         :param sublayer: 功能层，Encoder中可以为self-attention 或者 feed_forward中的一个
         :return:
         """
+        # x.shape=(batch_size, seq_len, embedding_dim)
+
         # x + 对应那个残差操作
         # 这个dropout和原文不太一样，加在这里是为了防止过拟合吧
         # layer normalization的位置也和原文不太一样，原文是放在最后，这里是放在最前面并且在最后一层再加一层layer normalization
@@ -206,6 +228,10 @@ class TransformerDecoder(nn.Module):
         :param dst_mask: 防止标签泄露的mask
         :return:
         """
+        # x.shape=(batch_size, seq_len, embedding_dim)
+        # memory.shape=(batch_size, seq_len, embedding_dim)
+        # src_mask.shpae=(batch_size, 1, seq_len)
+        # dst_mask.shape=(batch_size, 1, seq_len)
         for layer in self.layers:
             x = layer(x, memory, src_mask, dst_mask)
         return self.norm(x)
@@ -240,6 +266,10 @@ class DecodeLayer(nn.Module):
         :param dst_mask: 防止标签泄露的mask
         :return:
         """
+        # x.shape=(batch_size, seq_len, embedding_dim)
+        # memory.shape=(batch_size, seq_len, embedding_dim)
+        # src_mask.shpae=(batch_size, 1, seq_len)
+        # dst_mask.shape=(batch_size, 1, seq_len)
         m = memory
         # 这里是self-attention子层，对于self-attention来说，Query, Key和Value都是等于x
         # lambda表达式中的x只是一个形式参数，不是输入x
@@ -281,11 +311,14 @@ class MultiHeadAttention(nn.Module):
         :return:
         """
         # query.shape=key.shape=value.shape=(batch_size, seq_len, embedding_dim)
+        # mask.shape=(batch_size, 1, seq_len) in Encoder(self-attention)
+        # mask.shape=(batch_size, seq_len, seq_len) in Decoder(self-attention)
         # 注意这里的embedding_dim = multi_output_dim，为了保证后面计算的一致性
         if mask is not None:
             # 扩维，原本mask.shap = (batch_size, 1, seq_len)
             # 扩充之后变为(batch_size, 1, 1, seq_len)
             mask = mask.unsqueeze(1)
+            # mask.shape=(batch_size, 1, 1, seq_len)
             # 由于广播机制，所有head的mask都一样
         batch_size = query.size(0)
         # 首先使用线性变换，然后将multi_output_dim分配给head_num个头，每个头为 d_k = multi_output_dim / head_num
@@ -293,6 +326,7 @@ class MultiHeadAttention(nn.Module):
         # 在经过view操作后，query.shape=(batch_size, seq_len, head_num, d_k)
         # 再经过transpose操作后，query.shape=(batch_size, head_num, seq_len, d_k)和attention函数要求的维度一致
         query, key, value = [l(x).view(batch_size, -1, self.head_num, self.d_k).transpose(1, 2) for l, x in zip(self.linears, (query, key, value))]
+        # key.shape=value.shape=query.shape=(batch_size, head_num, seq_len, d_k)
         x, self.attention = attention(query, key, value, mask=mask, dropout=self.dropout)
         # attention 函数操作完之后x.shape=(batch_size ,head_num, seq_len, d_k)
         # self.attention.shape=(batch_size, head_num ,seq_len, seq_len)
@@ -336,12 +370,13 @@ class Embeddings(nn.Module):
         :param embedding_dim: embedding的维度
         :param vocab_len: 词表vocab的长度
         """
+        super(Embeddings, self).__init__()
         self.lut = nn.Embedding(vocab_len, embedding_dim)
         self.embedding_dim = embedding_dim
 
     def forward(self, x):
-        # 这里没看懂为啥要乘以embedding_dim的平方根
-        return self.lut(x) * torch.sqrt(self.embedding_dim)
+        # 这里看懂为啥要乘以embedding_dim的平方根
+        return self.lut(x) * math.sqrt(self.embedding_dim)
 
 
 class PositionalEncoding(nn.Module):
@@ -349,13 +384,13 @@ class PositionalEncoding(nn.Module):
     位置编码
     """
     def __init__(self, embedding_dim, dropout, max_len=5000):
-        super(PositionalEncoding, self)
+        super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
 
         # 在log空间中计算位置编码
         positionalEncode = torch.zeros(max_len, embedding_dim)
         position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, embedding_dim, 2) * -(torch.log(10000.0) / embedding_dim))
+        div_term = torch.exp(torch.arange(0, embedding_dim, 2) * -(math.log(10000.0) / embedding_dim))
         positionalEncode[:, 0::2] = torch.sin(position * div_term)
         positionalEncode[:, 1::2] = torch.cos(position * div_term)
         positionalEncode = positionalEncode.unsqueeze(0)
@@ -371,31 +406,35 @@ class PositionalEncoding(nn.Module):
         x = x + torch.tensor(self.pe[:, :x.size(1)], requires_grad=False)
         return self.dropout(x)
 
+
 if __name__ == '__main__':
     # 设置命令行参数
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, default=100, help='minibatch size')
+    parser.add_argument('--batch_size', type=int, default=64, help='minibatch size')
     parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
-    parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs')
-    parser.add_argument('--embedding_dim', type=int, default=512, help='number of word embedding')
-    parser.add_argument('--gpu', type=int, default=0, help='GPU NO, only support 1 or 2')
+    parser.add_argument('--num_epochs', type=int, default=1, help='number of epochs')
+    parser.add_argument('--embedding_dim', type=int, default=128, help='number of word embedding')
+    parser.add_argument('--gpu', type=int, default=0, help='GPU No, only support 1 or 2')
     parser.add_argument('--head_num', type=int, default=8, help="Multi head number")
     parser.add_argument('--hidden_num', type=int, default=2048, help="hidden neural number")
     parser.add_argument('--dropout', type=float, default=0.1, help="dropout rate")
+    parser.add_argument('--padding', type=int, default=50, help="padding length")
     args = parser.parse_args()
 
     # 指定device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # 设置运行在哪张gpu上面
+    torch.cuda.set_device(args.gpu)
 
     # 准备数据读取数据
-    trainData = Data(mode='train')
-    validData = Data(mode='valid')
-    testData = Data(mode='test')
+    trainData = Data(padding=args.padding, mode='train')
+    validData = Data(padding=args.padding, mode='valid')
+    testData = Data(padding=args.padding, mode='test')
 
     # 准备dataloader, 使用tqdm封装打印进度条, 方便查看运行进度
-    trainDataLoader = tqdm(DataLoader(trainData, batch_size=args.batch_size, shuffle=True))
-    validDataLoader = tqdm(DataLoader(validData, batch_size=args.batch_size, shuffle=True))
-    testDataLoader = tqdm(DataLoader(testData, batch_size=args.batch_size, shuffle=True))
+    trainDataLoader = DataLoader(trainData, batch_size=args.batch_size, shuffle=True, num_workers=32, drop_last=True)
+    validDataLoader = DataLoader(validData, batch_size=args.batch_size, shuffle=True, num_workers=32, drop_last=True)
+    testDataLoader = DataLoader(testData, batch_size=args.batch_size, shuffle=True, num_workers=32, drop_last=True)
 
     # 对于Vocab来说，三种模式下的vocabZh和vocabEn都一样
     zhVocabLen = trainData.getVocabZhLen()
@@ -403,16 +442,16 @@ if __name__ == '__main__':
 
     # 实例化attention
     cp = copy.deepcopy
-    attention = MultiHeadAttention(head_num=args.head_num, multi_output_dim=args.embedding_dim).to(device)
+    multiHeadAttention = MultiHeadAttention(head_num=args.head_num, multi_output_dim=args.embedding_dim).to(device)
     feedForward = PositionWiseFeedForward(embedding_dim=args.embedding_dim, hidden_num=args.hidden_num, dropout=args.dropout).to(device)
     position = PositionalEncoding(embedding_dim=args.embedding_dim, dropout=args.dropout).to(device)
 
     # 构建Encoder
-    encodeLayer = EncodeLayer(args.embedding_dim, cp(attention), cp(feedForward), dropout=args.dropout).to(device)
+    encodeLayer = EncodeLayer(args.embedding_dim, cp(multiHeadAttention), cp(feedForward), dropout=args.dropout).to(device)
     transformerEncoder = TransformerEncoder(encode_layer=encodeLayer, N=6).to(device)
 
     # 构建Decoder
-    decodeLayer = DecodeLayer(args.embedding_dim, cp(attention), cp(attention), cp(feedForward), args.dropout).to(device)
+    decodeLayer = DecodeLayer(args.embedding_dim, cp(multiHeadAttention), cp(multiHeadAttention), cp(feedForward), args.dropout).to(device)
     transformerDecoder = TransformerDecoder(decode_layer=decodeLayer, N=6).to(device)
 
     # 构建srd_embedding
@@ -425,19 +464,160 @@ if __name__ == '__main__':
     # 构建transformer 机器翻译模型
     translateEn2Zh = TranslateEn2Zh(encoder=transformerEncoder, decoder=transformerDecoder, src_embedding=src_embedding,\
                                     dst_embedding=dst_embedding, generator=generator).to(device)
-
     # 随机初始化
     for param in translateEn2Zh.parameters():
         if param.dim() > 1:
             nn.init.xavier_uniform(param)
 
+    # 定义优化器，损失函数等基本组件
+    optimizer = torch.optim.Adam(translateEn2Zh.parameters(), lr=args.lr)
+    criterion = torch.nn.NLLLoss()
+
+    # 日志文件存储位置
+    log_save_path = '../data/log/lr:{}-batch_size:{}-epochs:{}-embedding_dim:{}-head_num:{}-date:{}-translate_params.log'.format( \
+        args.lr, args.batch_size, args.num_epochs, args.embedding_dim, args.head_num, time.strftime("%Y-%m-%d-%H-%M", time.localtime()))
+    f = open(log_save_path, 'w')
+
+    #
+    index2wordEn = np.load('../data/index2word_en.npy').item()
+    index2wordZh = np.load('../data/index2word_zh.npy').item()
+
     # 开始训练
+
+    bleu = []
     for epoch in range(args.num_epochs):
-        for batchIndex, (englishSeq, chineseSeq, lengths) in enumerate(trainDataLoader):
+        # 每个epoch的loss
+        loss_sum = 0
+        batch_sum = 0
+        # Training
+        for batchIndex, (englishSeq, chineseSeq, chineseSeqY, _) in enumerate(tqdm(trainDataLoader)):
+            batch_sum += 1
+            # englishSeq.shape=(batch_size, paded_seq_len)
+            # chineseSeq.shape=(batch_size, paded_seq_len)
+            # chineseSeqY.shape=(batch_size, padded_seq_len)
             englishSeq = englishSeq.to(device)
             chineseSeq = chineseSeq.to(device)
-            src_mask = subsequent_mask(lengths)
-            out = translateEn2Zh.forward(english_seq=englishSeq, english_mask=, chinese_seq=chineseSeq, chinese_mask=)
+            chineseSeqY = chineseSeqY.to(device)
+            src_mask = (englishSeq != 3).unsqueeze(-2)
+            # src_mask.shape=(batch_size, 1, seq_len)
+            dst_mask = make_std_mask(chineseSeq, 3)
+            # dst_mask.shape=(batch_size, seq_len, seq_len)
+            out = translateEn2Zh.forward(english_seq=englishSeq, english_mask=src_mask, chinese_seq=chineseSeq, chinese_mask=dst_mask)
+            # out.shape=(batch_size, seq_len, embedding_dim)
+            output = translateEn2Zh.generator(out)
+            # output.shape=(batch_size, seq_len, zhVocabLen)
+            output = output.view(-1, output.size(-1))
+            # output.shape=(batch_size * seq_len, zhVocabLen)
+            chineseSeqY = chineseSeqY.view(-1)
+            # chineseSeqY.shape=(baych_size * seq_len, )
+            loss = criterion(output, chineseSeqY)
+            loss_sum += loss
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        print("epoch {}, loss {:.4f}".format(epoch + 1, loss_sum / batch_sum))
+        print("epoch {}, loss {:.4f}".format(epoch + 1, loss_sum / batch_sum), file=f)
+        # Validing
+        with torch.no_grad():
+            blue_socres = []
+            for valid_index, (englishSeq, chineseSeq, chineseSeqY, chineseSeqY_lens) in enumerate(tqdm(validDataLoader)):
+                # englishSeq.shape=(batch_size, paded_seq_len)
+                # chineseSeq.shape=(batch_size, paded_seq_len)
+                # chineseSeqY.shape=(batch_size, padded_seq_len)
+                englishSeq = englishSeq.to(device)
+                chineseSeq = chineseSeq.to(device)
+                chineseSeqY = chineseSeqY.to(device)
+                src_mask = (englishSeq != 3).unsqueeze(-2)
+                # src_mask.shape=(batch_size, 1, seq_len)
+                memory = translateEn2Zh.encode(englishSeq, src_mask)
+                # memory.shape=(batch_size, seq_len, embedding_dim)
+                translate = torch.ones(args.batch_size, 1).fill_(0).type_as(englishSeq.data)
+                # ys.shape=(1, 1)
+                for i in range(50):
+                    translate_mask = make_std_mask(translate, 3)
+                    out = translateEn2Zh.decode(memory, src_mask, translate, translate_mask)
+                    prob = translateEn2Zh.generator(out[:, -1])
+                    _, next_word = torch.max(prob, dim=1)
+                    next_word = next_word.unsqueeze(1)
+                    translate = torch.cat([translate, next_word], dim=1)
+                blue_socres += compute_bleu(translate, chineseSeqY, chineseSeqY_lens)
+                if (valid_index + 1) % 1 == 0:
+                    reference_sentence = chineseSeqY[0].tolist()
+                    translate_sentence = translate[0].tolist()
+                    englishSeq_sentence = englishSeq[0].tolist()
+                    reference_sentence_len = chineseSeqY_lens.tolist()[0]
+                    if 1 in translate_sentence:
+                        index = translate_sentence.index(1)
+                    else:
+                        index = len(translate_sentence)
+                    print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])))
+                    print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])))
+                    print("参考译文: {}".format(
+                        "".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])))
+                    print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])), file=f)
+                    print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])), file=f)
+                    print("参考译文: {}".format("".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])), file=f)
+            #
+            epoch_bleu = np.sum(blue_socres) / len(blue_socres)
+            bleu.append(epoch_bleu)
+
+
+        print("epoch {}, Valid average bleu: {:.2%}".format((epoch + 1), epoch_bleu))
+        print("epoch {}, Valid average bleu: {:.2%}".format((epoch + 1), epoch_bleu), file=f)
+    # Testing
+    print("Start Testing...")
+    print("Start Testing...", file=f)
+    blue_socres = []
+    for batch_index, (englishSeq, chineseSeq, chineseSeqY, chineseSeqY_lens) in enumerate(testDataLoader):
+        englishSeq = englishSeq.to(device)
+        chineseSeq = chineseSeq.to(device)
+        chineseSeqY = chineseSeqY.to(device)
+        src_mask = (englishSeq != 3).unsqueeze(-2)
+        memory = translateEn2Zh.encode(englishSeq, src_mask)
+        translate = torch.ones(args.batch_size, 1).fill_(0).type_as(englishSeq.data)
+        # ys.shape=(1, 1)
+        for i in range(50):
+            translate_mask = make_std_mask(translate, 3)
+            out = translateEn2Zh.decode(memory, src_mask, translate, translate_mask)
+            prob = translateEn2Zh.generator(out[:, -1])
+            _, next_word = torch.max(prob, dim=1)
+            next_word = next_word.unsqueeze(1)
+            translate = torch.cat([translate, next_word], dim=1)
+        blue_socres += compute_bleu(translate, chineseSeqY, chineseSeqY_lens)
+        if (batch_index + 1) % 10 == 0:
+            reference_sentence = chineseSeqY[0].tolist()
+            translate_sentence = translate[0].tolist()
+            englishSeq_sentence = englishSeq[0].tolist()
+            reference_sentence_len = chineseSeqY_lens.tolist()[0]
+            if 1 in translate_sentence:
+                index = translate_sentence.index(1)
+            else:
+                index = len(translate_sentence)
+            print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])))
+            print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])))
+            print("参考译文: {}".format("".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])))
+            print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])), file=f)
+            print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])), file=f)
+            print("参考译文: {}".format("".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])), file=f)
+            print('\n\n')
+            print('\n\n', file=f)
+    epoch_bleu = np.sum(blue_socres) / len(blue_socres)
+    print("Final test, Test average bleu: {:.2%}".format(epoch_bleu))
+    print("Final test, Test average bleu: {:.2%}".format(epoch_bleu), file=f)
+
+    # save model
+    save_path = '../data/model/lr:{}-batch_size:{}-epochs:{}-embedding_dim:{}-head_num:{}-bleu:{}-date:{}-translate_params.pkl'.format(\
+        args.lr, args.batch_size, args.num_epochs, args.embedding_dim, args.head_num, epoch_bleu, time.strftime("%Y-%m-%d-%H-%M", time.localtime()))
+    torch.save(translateEn2Zh.state_dict(), save_path)
+    print("Save model to {}".format(save_path))
+    print("Save model to {}".format(save_path), file=f)
+
+    f.close()
+
+
+
+
+
 
 
 
