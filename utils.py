@@ -5,7 +5,8 @@ import torch
 import torch.nn.functional as F
 import math
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from model import *
+import sys
+sys.path.append('.')
 
 def aggreVocab(filePaths, outputPath):
     """
@@ -29,6 +30,7 @@ def aggreVocab(filePaths, outputPath):
                 words = line.strip().split(' ')
                 for word in words:
                     vocabList.append(word)
+    # vocabCount = collections.Counter(vocabList).most_common(2)
     # vocabSet存储经过去重的词表
     vocabSet = set(vocabList)
     # vocabDict 存储 word:index
@@ -150,51 +152,25 @@ def compute_bleu(translate, reference, references_lens):
         blue_score.append(sentence_bleu([reference_sentence[:references_len]], translate_sentence[:index], weights=(0.3, 0.4, 0.3, 0.0), smoothing_function=smooth.method1))
     return blue_score
 
-def initTranslateModel(args, modelpath):
-    cp = copy.deepcopy
-    multiHeadAttention = MultiHeadAttention(head_num=args.head_num, multi_output_dim=args.embedding_dim).to(device)
-    feedForward = PositionWiseFeedForward(embedding_dim=args.embedding_dim, hidden_num=args.hidden_num,
-                                          dropout=args.dropout).to(device)
-    position = PositionalEncoding(embedding_dim=args.embedding_dim, dropout=args.dropout).to(device)
 
-    # 构建Encoder
-    encodeLayer = EncodeLayer(args.embedding_dim, cp(multiHeadAttention), cp(feedForward), dropout=args.dropout).to(
-        device)
-    transformerEncoder = TransformerEncoder(encode_layer=encodeLayer, N=6).to(device)
+def make_model(src_vocab, tgt_vocab, N=6, d_model=512, d_ff=2048, h=8, dropout=0.1):
+    c = copy.deepcopy
+    attn = MultiHeadedAttention(h, d_model)
+    ff = PositionwiseFeedForward(d_model, d_ff, dropout)
+    position = PositionalEncoding(d_model, dropout)
+    model = EncoderDecoder(
+        Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),
+        Decoder(DecoderLayer(d_model, c(attn), c(attn),
+                             c(ff), dropout), N),
+        nn.Sequential(Embeddings(d_model, src_vocab), c(position)),
+        nn.Sequential(Embeddings(d_model, tgt_vocab), c(position)),
+        Generator(d_model, tgt_vocab))
 
-    # 构建Decoder
-    decodeLayer = DecodeLayer(args.embedding_dim, cp(multiHeadAttention), cp(multiHeadAttention), cp(feedForward),
-                              args.dropout).to(device)
-    transformerDecoder = TransformerDecoder(decode_layer=decodeLayer, N=6).to(device)
-
-    # 构建srd_embedding
-    src_embedding = nn.Sequential(Embeddings(args.embedding_dim, enVocabLen), cp(position)).to(device)
-    dst_embedding = nn.Sequential(Embeddings(args.embedding_dim, zhVocabLen), cp(position)).to(device)
-
-    # 构建generator
-    generator = Generator(decoder_dim=args.embedding_dim, vocab_len=zhVocabLen).to(device)
-
-    # 构建transformer 机器翻译模型
-    translateEn2Zh = TranslateEn2Zh(encoder=transformerEncoder, decoder=transformerDecoder, src_embedding=src_embedding, \
-                                    dst_embedding=dst_embedding, generator=generator).to(device)
-    translateEn2Zh.load_state_dict(torch.load(modelpath))
-    return translateEn2Zh
-
-def testModel(modelpath):
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, default=64, help='minibatch size')
-    parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
-    parser.add_argument('--num_epochs', type=int, default=1, help='number of epochs')
-    parser.add_argument('--embedding_dim', type=int, default=128, help='number of word embedding')
-    parser.add_argument('--gpu', type=int, default=0, help='GPU No, only support 1 or 2')
-    parser.add_argument('--head_num', type=int, default=8, help="Multi head number")
-    parser.add_argument('--hidden_num', type=int, default=2048, help="hidden neural number")
-    parser.add_argument('--dropout', type=float, default=0.1, help="dropout rate")
-    parser.add_argument('--padding', type=int, default=50, help="padding length")
-    args = parser.parse_args()
-    translateModel = initTranslateModel(args, modelpath)
-    return translateModel
-
+    for p in model.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform(p)
+    return model
 
 if __name__ == '__main__':
-    pass
+    aggreVocab(['../data/train.en.tok', '../data/valid.en.tok', '../data/test.en.tok'], '../data/vocab_en_freq_2.npy')
+    aggreVocab(['../data/train.zh.tok', '../data/valid.zh.tok', '../data/test.zh.tok'], '../data/vocab_zh_freq_2.npy')

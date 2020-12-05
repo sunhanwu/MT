@@ -71,7 +71,11 @@ class Data(Dataset):
         en = torch.tensor(en)
         zh = torch.tensor(zh)
         # 分别返回en，训练用的zh[:-1]，和作为目标的zh[1:]
-        return en, zh[:-1], zh[1:], len_zh
+        if self.mdoe == 'train':
+            return en, zh[:-1], zh[1:], len_zh
+        else:
+            return en, zh, zh, len_zh
+
     # test
 
     def __len__(self):

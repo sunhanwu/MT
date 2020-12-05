@@ -15,7 +15,6 @@ import copy
 import time
 import math
 import argparse
-import ipdb
 import warnings
 from tqdm import tqdm
 warnings.filterwarnings("ignore")
@@ -410,6 +409,7 @@ class PositionalEncoding(nn.Module):
 if __name__ == '__main__':
     # 设置命令行参数
     parser = argparse.ArgumentParser()
+    parser.add_argument('mode', type=str,  help="train or test")
     parser.add_argument('--batch_size', type=int, default=64, help='minibatch size')
     parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
     parser.add_argument('--num_epochs', type=int, default=1, help='number of epochs')
@@ -417,8 +417,10 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', type=int, default=0, help='GPU No, only support 1 or 2')
     parser.add_argument('--head_num', type=int, default=8, help="Multi head number")
     parser.add_argument('--hidden_num', type=int, default=2048, help="hidden neural number")
-    parser.add_argument('--dropout', type=float, default=0.1, help="dropout rate")
+    parser.add_argument('--dropout', type=float, default=0.2, help="dropout rate")
     parser.add_argument('--padding', type=int, default=50, help="padding length")
+    parser.add_argument('--model_path', type=str, \
+                        default='../data/model/lr:0.001-batch_size:128-epochs:10-embedding_dim:256-head_num:8-bleu:0.17267120509754869-date:2020-12-06-01-02-translate_params.pkl', help="model path")
     args = parser.parse_args()
 
     # 指定device
@@ -482,45 +484,16 @@ if __name__ == '__main__':
     index2wordEn = np.load('../data/index2word_en.npy').item()
     index2wordZh = np.load('../data/index2word_zh.npy').item()
 
-    # 开始训练
-
-    bleu = []
-    for epoch in range(args.num_epochs):
-        # 每个epoch的loss
-        loss_sum = 0
-        batch_sum = 0
-        # Training
-        for batchIndex, (englishSeq, chineseSeq, chineseSeqY, _) in enumerate(tqdm(trainDataLoader)):
-            batch_sum += 1
-            # englishSeq.shape=(batch_size, paded_seq_len)
-            # chineseSeq.shape=(batch_size, paded_seq_len)
-            # chineseSeqY.shape=(batch_size, padded_seq_len)
-            englishSeq = englishSeq.to(device)
-            chineseSeq = chineseSeq.to(device)
-            chineseSeqY = chineseSeqY.to(device)
-            src_mask = (englishSeq != 3).unsqueeze(-2)
-            # src_mask.shape=(batch_size, 1, seq_len)
-            dst_mask = make_std_mask(chineseSeq, 3)
-            # dst_mask.shape=(batch_size, seq_len, seq_len)
-            out = translateEn2Zh.forward(english_seq=englishSeq, english_mask=src_mask, chinese_seq=chineseSeq, chinese_mask=dst_mask)
-            # out.shape=(batch_size, seq_len, embedding_dim)
-            output = translateEn2Zh.generator(out)
-            # output.shape=(batch_size, seq_len, zhVocabLen)
-            output = output.view(-1, output.size(-1))
-            # output.shape=(batch_size * seq_len, zhVocabLen)
-            chineseSeqY = chineseSeqY.view(-1)
-            # chineseSeqY.shape=(baych_size * seq_len, )
-            loss = criterion(output, chineseSeqY)
-            loss_sum += loss
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-        print("epoch {}, loss {:.4f}".format(epoch + 1, loss_sum / batch_sum))
-        print("epoch {}, loss {:.4f}".format(epoch + 1, loss_sum / batch_sum), file=f)
-        # Validing
-        with torch.no_grad():
-            blue_socres = []
-            for valid_index, (englishSeq, chineseSeq, chineseSeqY, chineseSeqY_lens) in enumerate(tqdm(validDataLoader)):
+    if args.mode == 'train':
+        # 开始训练
+        bleu = []
+        for epoch in range(args.num_epochs):
+            # 每个epoch的loss
+            loss_sum = 0
+            batch_sum = 0
+            # Training
+            for batchIndex, (englishSeq, chineseSeq, chineseSeqY, _) in enumerate(tqdm(trainDataLoader)):
+                batch_sum += 1
                 # englishSeq.shape=(batch_size, paded_seq_len)
                 # chineseSeq.shape=(batch_size, paded_seq_len)
                 # chineseSeqY.shape=(batch_size, padded_seq_len)
@@ -529,90 +502,167 @@ if __name__ == '__main__':
                 chineseSeqY = chineseSeqY.to(device)
                 src_mask = (englishSeq != 3).unsqueeze(-2)
                 # src_mask.shape=(batch_size, 1, seq_len)
-                memory = translateEn2Zh.encode(englishSeq, src_mask)
-                # memory.shape=(batch_size, seq_len, embedding_dim)
-                translate = torch.ones(args.batch_size, 1).fill_(0).type_as(englishSeq.data)
-                # ys.shape=(1, 1)
-                for i in range(50):
-                    translate_mask = make_std_mask(translate, 3)
-                    out = translateEn2Zh.decode(memory, src_mask, translate, translate_mask)
-                    prob = translateEn2Zh.generator(out[:, -1])
-                    _, next_word = torch.max(prob, dim=1)
-                    next_word = next_word.unsqueeze(1)
-                    translate = torch.cat([translate, next_word], dim=1)
-                blue_socres += compute_bleu(translate, chineseSeqY, chineseSeqY_lens)
-                if (valid_index + 1) % 1 == 0:
-                    reference_sentence = chineseSeqY[0].tolist()
-                    translate_sentence = translate[0].tolist()
-                    englishSeq_sentence = englishSeq[0].tolist()
-                    reference_sentence_len = chineseSeqY_lens.tolist()[0]
-                    if 1 in translate_sentence:
-                        index = translate_sentence.index(1)
-                    else:
-                        index = len(translate_sentence)
-                    print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])))
-                    print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])))
-                    print("参考译文: {}".format(
-                        "".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])))
-                    print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])), file=f)
-                    print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])), file=f)
-                    print("参考译文: {}".format("".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])), file=f)
-            #
-            epoch_bleu = np.sum(blue_socres) / len(blue_socres)
-            bleu.append(epoch_bleu)
+                dst_mask = make_std_mask(chineseSeq, 3)
+                # dst_mask.shape=(batch_size, seq_len, seq_len)
+                out = translateEn2Zh.forward(english_seq=englishSeq, english_mask=src_mask, chinese_seq=chineseSeq, chinese_mask=dst_mask)
+                # out.shape=(batch_size, seq_len, embedding_dim)
+                output = translateEn2Zh.generator(out)
+                # output.shape=(batch_size, seq_len, zhVocabLen)
+                output = output.view(-1, output.size(-1))
+                # output.shape=(batch_size * seq_len, zhVocabLen)
+                chineseSeqY = chineseSeqY.view(-1)
+                # chineseSeqY.shape=(baych_size * seq_len, )
+                loss = criterion(output, chineseSeqY)
+                loss_sum += loss
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            print("epoch {}, loss {:.4f}".format(epoch + 1, loss_sum / batch_sum))
+            print("epoch {}, loss {:.4f}".format(epoch + 1, loss_sum / batch_sum), file=f)
+            # Validing
+            with torch.no_grad():
+                blue_socres = []
+                for valid_index, (englishSeq, chineseSeq, chineseSeqY, chineseSeqY_lens) in enumerate(tqdm(validDataLoader)):
+                    # englishSeq.shape=(batch_size, paded_seq_len)
+                    # chineseSeq.shape=(batch_size, paded_seq_len)
+                    # chineseSeqY.shape=(batch_size, padded_seq_len)
+                    englishSeq = englishSeq.to(device)
+                    chineseSeq = chineseSeq.to(device)
+                    chineseSeqY = chineseSeqY.to(device)
+                    src_mask = (englishSeq != 3).unsqueeze(-2)
+                    # src_mask.shape=(batch_size, 1, seq_len)
+                    memory = translateEn2Zh.encode(englishSeq, src_mask)
+                    # memory.shape=(batch_size, seq_len, embedding_dim)
+                    translate = torch.ones(args.batch_size, 1).fill_(0).type_as(englishSeq.data)
+                    # translate_ = chineseSeqY[:, 0]
+                    # ys.shape=(1, 1)
+                    for i in range(args.padding):
+                        translate_mask = make_std_mask(translate, 3)
+                        out = translateEn2Zh.decode(memory, src_mask, translate, translate_mask)
+                        prob = translateEn2Zh.generator(out[:, -1])
+                        _, next_word = torch.max(prob, dim=1)
+                        next_word = next_word.unsqueeze(1)
+                        translate = torch.cat([translate, next_word], dim=1)
+                        # translate_ = chineseSeqY[:, :]
+                    blue_socres += compute_bleu(translate, chineseSeqY, chineseSeqY_lens)
+                    if (valid_index + 1) % 1 == 0:
+                        reference_sentence = chineseSeqY[0].tolist()
+                        translate_sentence = translate[0].tolist()
+                        englishSeq_sentence = englishSeq[0].tolist()
+                        reference_sentence_len = chineseSeqY_lens.tolist()[0]
+                        if 1 in translate_sentence:
+                            index = translate_sentence.index(1)
+                        else:
+                            index = len(translate_sentence)
+                        print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])))
+                        print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])))
+                        print("参考译文: {}".format(
+                            "".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])))
+                        print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])), file=f)
+                        print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])), file=f)
+                        print("参考译文: {}".format("".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])), file=f)
+                #
+                epoch_bleu = np.sum(blue_socres) / len(blue_socres)
+                bleu.append(epoch_bleu)
 
 
-        print("epoch {}, Valid average bleu: {:.2%}".format((epoch + 1), epoch_bleu))
-        print("epoch {}, Valid average bleu: {:.2%}".format((epoch + 1), epoch_bleu), file=f)
-    # Testing
-    print("Start Testing...")
-    print("Start Testing...", file=f)
-    blue_socres = []
-    for batch_index, (englishSeq, chineseSeq, chineseSeqY, chineseSeqY_lens) in enumerate(testDataLoader):
-        englishSeq = englishSeq.to(device)
-        chineseSeq = chineseSeq.to(device)
-        chineseSeqY = chineseSeqY.to(device)
-        src_mask = (englishSeq != 3).unsqueeze(-2)
-        memory = translateEn2Zh.encode(englishSeq, src_mask)
-        translate = torch.ones(args.batch_size, 1).fill_(0).type_as(englishSeq.data)
-        # ys.shape=(1, 1)
-        for i in range(50):
-            translate_mask = make_std_mask(translate, 3)
-            out = translateEn2Zh.decode(memory, src_mask, translate, translate_mask)
-            prob = translateEn2Zh.generator(out[:, -1])
-            _, next_word = torch.max(prob, dim=1)
-            next_word = next_word.unsqueeze(1)
-            translate = torch.cat([translate, next_word], dim=1)
-        blue_socres += compute_bleu(translate, chineseSeqY, chineseSeqY_lens)
-        if (batch_index + 1) % 10 == 0:
-            reference_sentence = chineseSeqY[0].tolist()
-            translate_sentence = translate[0].tolist()
-            englishSeq_sentence = englishSeq[0].tolist()
-            reference_sentence_len = chineseSeqY_lens.tolist()[0]
-            if 1 in translate_sentence:
-                index = translate_sentence.index(1)
-            else:
-                index = len(translate_sentence)
-            print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])))
-            print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])))
-            print("参考译文: {}".format("".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])))
-            print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])), file=f)
-            print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])), file=f)
-            print("参考译文: {}".format("".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])), file=f)
-            print('\n\n')
-            print('\n\n', file=f)
-    epoch_bleu = np.sum(blue_socres) / len(blue_socres)
-    print("Final test, Test average bleu: {:.2%}".format(epoch_bleu))
-    print("Final test, Test average bleu: {:.2%}".format(epoch_bleu), file=f)
+            print("epoch {}, Valid average bleu: {:.2%}".format((epoch + 1), epoch_bleu))
+            print("epoch {}, Valid average bleu: {:.2%}".format((epoch + 1), epoch_bleu), file=f)
+        # Testing
+        print("Start Testing...")
+        print("Start Testing...", file=f)
+        blue_socres = []
+        for batch_index, (englishSeq, chineseSeq, chineseSeqY, chineseSeqY_lens) in enumerate(testDataLoader):
+            englishSeq = englishSeq.to(device)
+            chineseSeq = chineseSeq.to(device)
+            chineseSeqY = chineseSeqY.to(device)
+            src_mask = (englishSeq != 3).unsqueeze(-2)
+            memory = translateEn2Zh.encode(englishSeq, src_mask)
+            translate = torch.ones(args.batch_size, 1).fill_(0).type_as(englishSeq.data)
+            # ys.shape=(1, 1)
+            for i in range(args.padding):
+                translate_mask = make_std_mask(translate, 3)
+                out = translateEn2Zh.decode(memory, src_mask, translate, translate_mask)
+                prob = translateEn2Zh.generator(out[:, -1])
+                _, next_word = torch.max(prob, dim=1)
+                next_word = next_word.unsqueeze(1)
+                translate = torch.cat([translate, next_word], dim=1)
+            blue_socres += compute_bleu(translate, chineseSeqY, chineseSeqY_lens)
+            if (batch_index + 1) % 10 == 0:
+                reference_sentence = chineseSeqY[0].tolist()
+                translate_sentence = translate[0].tolist()
+                englishSeq_sentence = englishSeq[0].tolist()
+                reference_sentence_len = chineseSeqY_lens.tolist()[0]
+                if 1 in translate_sentence:
+                    index = translate_sentence.index(1)
+                else:
+                    index = len(translate_sentence)
+                print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])))
+                print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])))
+                print("参考译文: {}".format("".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])))
+                print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence])), file=f)
+                print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])), file=f)
+                print("参考译文: {}".format("".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])), file=f)
+                print('\n\n')
+                print('\n\n', file=f)
+        epoch_bleu = np.sum(blue_socres) / len(blue_socres)
+        print("Final test, Test average bleu: {:.2%}".format(epoch_bleu))
+        print("Final test, Test average bleu: {:.2%}".format(epoch_bleu), file=f)
 
-    # save model
-    save_path = '../data/model/lr:{}-batch_size:{}-epochs:{}-embedding_dim:{}-head_num:{}-bleu:{}-date:{}-translate_params.pkl'.format(\
-        args.lr, args.batch_size, args.num_epochs, args.embedding_dim, args.head_num, epoch_bleu, time.strftime("%Y-%m-%d-%H-%M", time.localtime()))
-    torch.save(translateEn2Zh.state_dict(), save_path)
-    print("Save model to {}".format(save_path))
-    print("Save model to {}".format(save_path), file=f)
+        # save model
+        save_path = '../data/model/lr:{}-batch_size:{}-epochs:{}-embedding_dim:{}-head_num:{}-bleu:{}-date:{}-translate_params.pkl'.format(\
+            args.lr, args.batch_size, args.num_epochs, args.embedding_dim, args.head_num, epoch_bleu, time.strftime("%Y-%m-%d-%H-%M", time.localtime()))
+        torch.save(translateEn2Zh.state_dict(), save_path)
+        print("Save model to {}".format(save_path))
+        print("Save model to {}".format(save_path), file=f)
 
-    f.close()
+        f.close()
+    else:
+        translateEn2Zh.load_state_dict(torch.load(args.model_path))
+        blue_socres = []
+        fp = open('../data/test.zh_translate_{}.txt'.format( time.strftime("%Y-%m-%d-%H-%M", time.localtime())), 'w')
+        for batch_index, (englishSeq, chineseSeq, chineseSeqY, chineseSeqY_lens) in enumerate(testDataLoader):
+            englishSeq = englishSeq.to(device)
+            chineseSeq = chineseSeq.to(device)
+            chineseSeqY = chineseSeqY.to(device)
+            src_mask = (englishSeq != 3).unsqueeze(-2)
+            memory = translateEn2Zh.encode(englishSeq, src_mask)
+            translate = torch.ones(args.batch_size, 1).fill_(0).type_as(englishSeq.data)
+            # ys.shape=(1, 1)
+            for i in range(args.padding):
+                translate_mask = make_std_mask(translate, 3)
+                out = translateEn2Zh.decode(memory, src_mask, translate, translate_mask)
+                prob = translateEn2Zh.generator(out[:, -1])
+                _, next_word = torch.max(prob, dim=1)
+                next_word = next_word.unsqueeze(1)
+                translate = torch.cat([translate, next_word], dim=1)
+            blue_socres += compute_bleu(translate, chineseSeqY, chineseSeqY_lens)
+            for translate_sentence, reference_sentence, englishSeq_sentence, reference_sentence_len in zip(translate, chineseSeqY, englishSeq, chineseSeqY_lens):
+                reference_sentence = reference_sentence.tolist()
+                translate_sentence = translate_sentence.tolist()
+                englishSeq_sentence = englishSeq_sentence.tolist()
+                reference_sentence_len = reference_sentence_len.tolist()
+                if 1 in englishSeq_sentence:
+                    index_eng = englishSeq_sentence.index(1)
+                else:
+                    index_eng = len(englishSeq_sentence)
+                if 1 in translate_sentence:
+                    index = translate_sentence.index(1)
+                else:
+                    index = len(translate_sentence)
+                print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence[:index_eng]])))
+                print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])))
+                print("参考译文: {}\n\n".format(
+                    "".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])))
+                print("原文: {}".format(" ".join([index2wordEn.get(x) for x in englishSeq_sentence[:index_eng]])), file=fp)
+                print("机翻译文: {}".format("".join([index2wordZh.get(x) for x in translate_sentence[:index]])), file=fp)
+                print("参考译文: {}\n\n".format(
+                    "".join([index2wordZh.get(x) for x in reference_sentence[:reference_sentence_len]])), file=fp)
+        fp.close()
+
+
+
+
 
 
 
