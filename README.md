@@ -72,5 +72,47 @@ optional arguments:
 
 ## 实验结果
 
-1. 
+> 模型的翻译结果和运行日志可以在`test_zh_translate.txt`和`log`中查看，这里只展示一部分
+
+### 翻译效果
+
+```
+原文: <START> and also , the senate &apos;s other worry , the appearance of singularity -- well , it was a singularity back then .
+机翻译文: <START>还有，参议院，也是负面新闻的焦点，这是一个案例。
+参考译文: <START>而且，参议院担心的另一件事，这个头衔听起来很古怪--哦，它曾经在那段时光听起来古怪。
+
+
+原文: <START> you have not changed the story .
+机翻译文: <START>你也没有改变。
+参考译文: <START>故事的剧情依然如旧。
+
+
+原文: <START> well , the things i constantly hear are : too many chemicals , pesticides , hormones , monoculture , we don &apos;t want giant fields of the same thing , that &apos;s wrong .
+机翻译文: <START>我一直在听的东西是：许多化学，化学，化学，化学，我们不太熟悉，是哪个是非常不可能的，过大的问题，
+参考译文: <START>我经常听到的理由是：（转基因食物）太多化学成分了，太多农药、荷尔蒙，单一化的生产，确实我们不希望数百亩的地都是生产同样的作物，那样
+
+
+原文: <START> imagine you can have everybody make a small donation for one pixel .
+机翻译文: <START>想象你可以给每一个人提供一个小的捐赠钞票。
+参考译文: <START>想想你能让每个人捐出一个像素的钱。
+
+
+原文: <START> except for around the two towers , there is 32 inches of steel paralleling the bridge .
+机翻译文: <START>除了在这两个构式中，有32尊名为诈骗的史瓦西半径。
+参考译文: <START>除了在两座塔周围，桥边有32英寸的钢索，平行于桥。
+```
+
+### BLEU指标
+
+`translate_params.pkl`在以下超参数下训练：
+
++ lr=0.001
++ batch_size=128
++ embedding_dim=256
++ head_num=8
++ epoch_num=10
+
+最终的test集上的BLEU值为**17.26%**
+
+
 
